@@ -1,25 +1,14 @@
 /**
  * ENDPOINT NHẬN FORM LEAD PAGE EBOOK NÁM (bản GỘP VỀ BREVO — 02/07/2026)
- * Luồng mới: form -> ghi Sheet -> đẩy contact vào Brevo list #3 NGAY LẬP TỨC
- *            -> Automation #1 tự bắn Email 1 (chuỗi 6 email) trong vài giây.
- * Hệ 1 (guiEbookTuDong gửi mẫu cũ) sẽ BỎ QUA các dòng này vì cột P đã được đánh dấu sẵn.
- *
- * ====== CÁCH ÁP DỤNG (anh Hoàng làm trên tài khoản vikora2025) ======
- * 1. Mở đúng project Apps Script "leadpage nám" (project đang chứa doPost cũ).
- * 2. Xoá code cũ, dán toàn bộ file này vào, Save.
- * 3. ĐIỀN BREVO_API_KEY bên dưới: mở project "tặng ebook nám" (chứa hàm syncBrevo),
- *    copy giá trị BREVO_API_KEY trong code đó, dán vào giữa 2 dấu nháy.
- * 4. Deploy -> "Quản lý các tùy chọn triển khai" (Manage deployments) -> ✏️ Chỉnh sửa
- *    -> Version: "Phiên bản mới" (New version) -> Deploy.
- *    ⚠️ PHẢI làm kiểu "Edit -> New version" để GIỮ NGUYÊN URL /exec.
- *    (Nếu lỡ tạo New deployment = URL mới -> phải báo Claude cắm lại vào index.html.)
- * 5. Test: điền form với 1 email chưa từng dùng -> phải nhận Email 1 "Sách của chị đây rồi..."
- *    từ "Lê Thu Giang" trong ~1 phút, và KHÔNG nhận mẫu cũ từ vikora2025.
+ * Luồng mới: form -> đẩy contact vào Brevo list #3 NGAY (Automation #1 bắn Email 1 trong vài giây)
+ *            -> ghi Sheet, đánh dấu sẵn cột P + Q để hệ cũ bỏ qua.
+ * AN TOÀN: nếu đẩy Brevo LỖI -> để trống P + Q -> guiEbookTuDong gửi sách mẫu cũ
+ *          và syncBrevo đồng bộ lại sau (khách không bao giờ bị bỏ rơi).
  */
 
 var SHEET_ID = '1ChNOFlwznY2_bYxSZqFyoyEKPQpDLqArtwDYaXp7F9k';
 var TAB_NAME = 'Ebook nám';
-var BREVO_API_KEY = 'DAN_KEY_VAO_DAY'; // <-- copy từ code syncBrevo (project "tặng ebook nám")
+var BREVO_API_KEY = 'DAN_KEY_VAO_DAY'; // <-- anh copy dòng BREVO_API_KEY trong project "tặng ebook nám" thay vào đây
 var BREVO_LIST_ID = 3; // list "Khách Ebook Nám #3"
 
 function doPost(e) {
@@ -36,18 +25,21 @@ function doPost(e) {
       return ContentService.createTextOutput('NO_EMAIL').setMimeType(ContentService.MimeType.TEXT);
     }
 
-    // 1) Đẩy vào Brevo TRƯỚC (để khách nhận Email 1 chuỗi ngay cả khi ghi sheet lỗi)
-    var brevoResult = addToBrevo(email, name, phone);
+    // 1) Đẩy vào Brevo TRƯỚC để Email 1 chuỗi bắn ngay
+    var brevoOk = addToBrevo_(email, name);
 
-    // 2) Ghi sheet: A=thời gian, B=email, C=tên, D=sđt (dạng chữ, giữ số 0 đầu)
-    //    ... P (cột 16) = đánh dấu sẵn để guiEbookTuDong KHÔNG gửi mẫu cũ cho dòng này.
+    // 2) Ghi sheet: A=thời gian, B=email, C=tên, D=sđt (giữ số 0 đầu)
+    //    P (16) = chặn hệ cũ gửi mẫu cũ; Q (17) = chặn syncBrevo đồng bộ lại.
+    //    Chỉ đánh dấu khi Brevo OK; lỗi thì để trống cho 2 hệ cũ lo (fallback).
     var ss = SpreadsheetApp.openById(SHEET_ID);
     var sheet = ss.getSheetByName(TAB_NAME);
     var now = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'yyyy-MM-dd HH:mm:ss');
+    var markP = brevoOk ? ('✔ Brevo trực tiếp ' + now) : '';
+    var markQ = brevoOk ? ('✔ doPost ' + now) : '';
     sheet.appendRow([
       now, email, name, "'" + phone,
       '', '', '', '', '', '', '', '', '', '', '',
-      '✔ Brevo trực tiếp ' + now + ' (' + brevoResult + ')'
+      markP, markQ
     ]);
 
     return ContentService.createTextOutput('OK').setMimeType(ContentService.MimeType.TEXT);
@@ -57,31 +49,29 @@ function doPost(e) {
 }
 
 /**
- * Thêm/cập nhật contact vào Brevo list #3.
- * updateEnabled=true: khách cũ đã có trong list #3 sẽ KHÔNG bị kích hoạt chuỗi lại
- * (Automation chỉ trigger khi contact MỚI được thêm vào list — re-entry đang tắt).
+ * Thêm/cập nhật contact vào Brevo list #3. Trả về true nếu thành công.
+ * updateEnabled=true: khách đã có sẵn trong list #3 sẽ không bị kích hoạt chuỗi lại
+ * (Automation chỉ trigger khi contact MỚI vào list — re-entry đang tắt).
  */
-function addToBrevo(email, name, phone) {
+function addToBrevo_(email, name) {
   try {
-    var payload = {
-      email: email,
-      attributes: { FIRSTNAME: name },
-      listIds: [BREVO_LIST_ID],
-      updateEnabled: true
-    };
+    if (BREVO_API_KEY.indexOf('xkeysib') !== 0) return false; // chưa điền key
     var resp = UrlFetchApp.fetch('https://api.brevo.com/v3/contacts', {
       method: 'post',
       contentType: 'application/json',
       headers: { 'api-key': BREVO_API_KEY },
-      payload: JSON.stringify(payload),
+      payload: JSON.stringify({
+        email: email,
+        attributes: { FIRSTNAME: name },
+        listIds: [BREVO_LIST_ID],
+        updateEnabled: true
+      }),
       muteHttpExceptions: true
     });
     var code = resp.getResponseCode();
-    if (code === 201) return 'Brevo: tạo mới';
-    if (code === 204) return 'Brevo: cập nhật/đã có';
-    return 'Brevo lỗi ' + code + ': ' + resp.getContentText().slice(0, 120);
+    return (code === 201 || code === 204);
   } catch (err) {
-    return 'Brevo exception: ' + err;
+    return false;
   }
 }
 
